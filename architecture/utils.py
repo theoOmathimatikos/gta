@@ -16,16 +16,22 @@ def get_data(dataset, mode="train", start=0, end=None):
     :param start: starting index of dataset if not all data are to be used
     :param end: ending index of dataset if not all data are to be used
     """
-    # TODO. Adjust to SWAT: add size = [args.seq_len, args.label_len, args.pred_len]??
-    dataset_folder = os.path.join("datasets", dataset)
+    # TODO. Adjust to SWAT: add size = [args.seq_len, args.label_len, args.pred_len]
+    dataset_folder = os.path.join("architecture", dataset)
 
     # Load the data
     # WARNING: For good evaluation/inference, a total of window_size data need to be taken
     # from the train dataset and placed before the new data. This should not be done within
     # the model, but as a different pre-processing procedure.
     try:
-        data = np.loadtxt(os.path.join(dataset_folder, f"{mode}.txt"),
-                            delimiter=",", dtype=np.float32)[start:end, :]
+        if end is None:
+            data = pd.read_csv(os.path.join(dataset_folder, f"{mode}.txt"), 
+                           skiprows=start, header=None)
+        else:
+            data = pd.read_csv(os.path.join(dataset_folder, f"{mode}.txt"), 
+                           skiprows=start, nrows=end, header=None)
+        # data = np.loadtxt(os.path.join(dataset_folder, f"{mode}.txt"),
+        #                     delimiter=",", dtype=np.float32)[start:end, :]
         if mode=="train":
             # train data do not have labels - unsupervised learning
             labels = None
@@ -51,13 +57,18 @@ class SlidingWindowDataset(Dataset):
     """
     def __init__(self, data, seq_len, label_len, pred_len, stride=1, horizon=1, keep_time=True, scale=True):
         
-        # TODO. Diff name for other datasets
-        self.time_data = data.iloc[:, [0]]  # keep it as DF
-        self.data = data.iloc[:, 1:]
+        self.keep_time = keep_time
 
-        self.seq_len = seq_len # TODO. If data=='SWat': window_size = 8*60
-        self.label_len = label_len # TODO. If data=='SWat': window_size = 2*60
-        self.pred_len = pred_len # TODO. If data=='SWat': window_size = 2*60
+        if self.keep_time:
+            self.time_data = data.iloc[:, [0]]  # keep it as DF
+            self.data = data.iloc[:, 1:]
+
+        else:
+            self.data = data.iloc[:, 1:]
+
+        self.seq_len = seq_len 
+        self.label_len = label_len
+        self.pred_len = pred_len 
 
         self.stride = stride
         self.horizon = horizon
@@ -66,10 +77,10 @@ class SlidingWindowDataset(Dataset):
             scaler = MinMaxScaler()
             self.data = scaler.fit_transform(self.data.values)
 
-        if keep_time:
+        if self.keep_time:
 
             df_stamp = self.time_data
-            df_stamp['Timestamp'] = pd.to_datetime(df_stamp['0'])
+            df_stamp['Timestamp'] = pd.to_datetime(df_stamp[0])
             df_stamp['month'] = df_stamp['Timestamp'].apply(lambda row:row.month,1)
             df_stamp['day'] = df_stamp['Timestamp'].apply(lambda row:row.day,1)
             df_stamp['weekday'] = df_stamp['Timestamp'].apply(lambda row:row.weekday(),1)
@@ -90,14 +101,18 @@ class SlidingWindowDataset(Dataset):
         r_end = s_end + self.pred_len
 
         seq_x = self.data[s_begin:s_end]
-        seq_y = self.data[r_begin:r_end]
-        seq_x_mark = self.data_stamp[s_begin:s_end]
-        seq_y_mark = self.data_stamp[r_begin:r_end]        
+        seq_y = self.data[r_begin:r_end]        
 
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
+        if self.keep_time:
+            seq_x_mark = self.data_stamp[s_begin:s_end]
+            seq_y_mark = self.data_stamp[r_begin:r_end]
+            return seq_x, seq_y, seq_x_mark, seq_y_mark
+        
+        else:
+            return seq_x, seq_y
+
     
     def __len__(self):
-
         return len(self.data) - self.seq_len - self.pred_len + 1
 
 
@@ -384,22 +399,6 @@ def calculate_latency(y_true, y_pred):
     return num_correct, avg_delay, identified_events, not_identified_events
 
 # - - - For gta - - - 
-
-def specify_args(args):
-
-    data_parser = {
-        'WADI':{'data':'datasets/WADI_14days_downsampled.csv','T':'1_LS_001_AL','M':112,'S':1},
-        'SMAP':{'data':'datasets/SMAP','T':0,'M':25,'S':1},
-        'MSL':{'data':'datasets/MSL','T':0,'M':55,'S':1},
-        'SWaT':{'data':'datasets/SWaT','T':'FIT_101','M':51,'S':1}
-    }
-    if args.dataset in data_parser.keys():
-        data_info = data_parser[args.dataset]
-        args.data_path = data_info['data']
-        args.target = data_info['T']
-        args.num_nodes = data_info[args.features]
-    
-    return args
 
 def _acquire_device(use_gpu, gpu):
     if use_gpu:

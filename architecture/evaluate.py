@@ -4,7 +4,7 @@ import pandas as pd
 import torch
 import os
 
-from args import predict_parser
+from args import get_args
 from model import Handler
 from utils import get_run_id, get_data, SlidingWindowDataset, create_data_loader
 from utils import pot_threshold, json_to_numpy, update_json
@@ -15,11 +15,9 @@ import mlflow
 if __name__ == "__main__":
 
     # Get arguments from console
-    parser = predict_parser()
-    args = parser.parse_args()
+    args = get_args(train=False)
 
     dataset = args.dataset
-
     run_id = get_run_id(args.run_name, f"{dataset}_training")
 
     with mlflow.start_run(run_id=run_id):
@@ -29,11 +27,11 @@ if __name__ == "__main__":
         # Get configs used for model training
         print(f'Using model from run with ID: {run_id}')
         model_parser = argparse.ArgumentParser()
-        model_args, unknown = model_parser.parse_known_args()
+        model_args, unknown = model_parser.parse_known_args()  # What does that do?
         
         model_args.__dict__ = mlflow.artifacts.load_dict(art_uri+"/config.txt")
 
-        window_size = model_args.window_size
+        # window_size = model_args.seq_len
 
         # --------------------------- START EVALUATION -----------------------------
         # Get data from the dataset
@@ -42,18 +40,20 @@ if __name__ == "__main__":
         # This workaround needs to happen internally at the moment
         # We must use the last window_size timestamps from training as the first window_size timestamps
         # for evaluation, due to the sliding window framework
-        x_train, _ = get_data(dataset, mode="train", start=-window_size, end=None)
-        x_eval = np.concatenate((x_train, x_eval), axis=0)
+        x_train, _ = get_data(dataset, mode="train", start=-args.seq_len, end=None)
+        x_eval = pd.concat([x_train, x_eval])
 
         # Cast data into tensor objects
-        x_eval = torch.from_numpy(x_eval).float()
+        # x_eval = torch.from_numpy(x_eval).float()
+        x_eval = x_eval.astype(float)
         n_features = x_eval.shape[1]
 
         # We want to perform forecasting/reconstruction on all features
         out_dim = n_features
 
         # Construct dataset from tensor objects - no stride here
-        eval_dataset = SlidingWindowDataset(x_eval, window_size)
+        eval_dataset = SlidingWindowDataset(x_eval, args.seq_len, args.label_len, args.pred_len, 
+                                        keep_time=args.keep_time)
 
         print("Evaluating:")
         # Create the data loader - no shuffling here
@@ -67,13 +67,15 @@ if __name__ == "__main__":
             model=model,
             optimizer=None,
             scheduler=None,
-            window_size=window_size,
+            keep_time=args.keep_time,
+            window_size=args.seq_len,
+            pred_len=args.pred_len,
             n_features=n_features,
             batch_size=model_args.batch_size,
             n_epochs=None,
             patience=None,
             forecast_criterion=None,
-            recon_criterion=None,
+            # recon_criterion=None,
             use_cuda=args.use_cuda,
             print_every=None
             # gamma=model_args.gamma
@@ -98,7 +100,7 @@ if __name__ == "__main__":
         train_scores = json_to_numpy(art_uri+"/anom_scores.json")
 
         if args.use_mov_av:
-            smoothing_window = int(model_args.batch_size * window_size * 0.05)
+            smoothing_window = int(model_args.batch_size * args.seq_len * 0.05)
             train_scores = pd.DataFrame(train_scores).ewm(span=smoothing_window).mean().values.flatten()
             new_scores = pd.DataFrame(new_scores).ewm(span=smoothing_window).mean().values.flatten()
 

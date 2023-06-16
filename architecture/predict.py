@@ -5,7 +5,7 @@ import pandas as pd
 import torch
 import os
 
-from args import predict_parser
+from args import get_args
 from model import Handler
 from utils import get_data, SlidingWindowDataset, create_data_loader, pot_threshold, get_run_id, json_to_numpy
 
@@ -14,8 +14,7 @@ import mlflow
 if __name__ == "__main__":
 
     # Get arguments from console
-    parser = predict_parser()
-    args = parser.parse_args()
+    args = get_args(train=False)
 
     # Get custom id for every run
     id = datetime.now().strftime("%d%m%Y_%H%M%S")
@@ -50,7 +49,7 @@ if __name__ == "__main__":
         
         model_args.__dict__ = mlflow.artifacts.load_dict(train_art_uri+"/config.txt")
 
-        window_size = model_args.window_size
+        window_size = model_args.seq_len
 
         # --------------------------- START PREDICTION -----------------------------
         # Get data from the dataset
@@ -60,17 +59,19 @@ if __name__ == "__main__":
         # We must use the last window_size timestamps from training as the first window_size timestamps
         # for evaluation, due to the sliding window framework
         x_train, _ = get_data(dataset, mode="train", start=-window_size, end=None)
-        x_new = np.concatenate((x_train, x_new), axis=0)
+        x_new = pd.concat([x_train, x_new])
 
         # Cast data into tensor objects
-        x_new = torch.from_numpy(x_new).float()
+        # x_new = torch.from_numpy(x_new).float()
+        x_new = x_new.astype(float)
         n_features = x_new.shape[1]
 
         # We want to perform forecasting/reconstruction on all features
         out_dim = n_features
 
         # Construct dataset from tensor objects - no stride here
-        new_dataset = SlidingWindowDataset(x_new, window_size)
+        new_dataset = SlidingWindowDataset(x_new, args.seq_len, args.label_len, args.pred_len, 
+                                        keep_time=args.keep_time)
 
         print("Predicting:")
         # Create the data loader - no shuffling here
@@ -81,13 +82,15 @@ if __name__ == "__main__":
             model=model,
             optimizer=None,
             scheduler=None,
-            window_size=window_size,
+            keep_time=args.keep_time,
+            window_size=args.seq_len,
+            pred_len=args.pred_len,
             n_features=n_features,
             batch_size=model_args.batch_size,
             n_epochs=None,
             patience=None,
             forecast_criterion=None,
-            recon_criterion=None,
+            # recon_criterion=None,
             use_cuda=args.use_cuda,
             print_every=None
             # gamma=model_args.gamma

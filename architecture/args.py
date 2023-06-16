@@ -18,9 +18,8 @@ def train_parser():
     # Basic params
     parser.add_argument('--model', type=str, default='gta', help='model of the experiment')
 
-    parser.add_argument('--dataset', type=str, default='SWaT', help='data')
-    # parser.add_argument('--root_path', type=str, default='./datasets/', help='root path of the data file')
-    # parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='location of the data file')    # TODO. Check if unnecessary
+    parser.add_argument('--dataset', type=str, default='swat', help='data')
+    parser.add_argument('--keep_time', type=bool, default=False, help='keep time data as pos.emb. for the Informer')
     parser.add_argument('--features', type=str, default='M', help='features [S, M]')   # TODO. Check if unnecessary
     parser.add_argument('--target', type=str, default='OT', help='target feature')    # TODO. Check if unnecessary
 
@@ -37,8 +36,6 @@ def train_parser():
     parser.add_argument('--num_levels', type=int, default=3, help='number of dilated levels for graph embedding')
 
     # Details of the Transformer block
-    # parser.add_argument('--dec_in', type=int, default=7, help='decoder input size')
-    # parser.add_argument('--c_out', type=int, default=7, help='output size')
     parser.add_argument('--d_model', type=int, default=128, help='dimension of model')
     parser.add_argument('--n_heads', type=int, default=8, help='num of heads')
     parser.add_argument('--e_layers', type=int, default=3, help='num of encoder layers')
@@ -73,6 +70,10 @@ def train_parser():
     parser.add_argument('--use_gpu', type=str2bool, default=True, help='use gpu')
     parser.add_argument('--gpu', type=int, default=0, help='gpu')
 
+    # For epsilon
+    parser.add_argument("--reg_level", default=1, help="Controls the reg_level argument of the epsilon thresholding method. Set to None if you don't want to calculate this threshold during training.")
+    parser.add_argument("--use_mov_av", type=str2bool, default=False)
+
     return parser
 
 
@@ -83,22 +84,23 @@ def predict_parser():
     parser.add_argument('--model', type=str, default='gta',help='model of the experiment')
 
     # --- Data params ---
-    parser.add_argument("--dataset", type=str, default="system_1")
+    parser.add_argument("--dataset", type=str, default="swat")
     parser.add_argument("--eval_start", type=int, default=0)
     parser.add_argument("--eval_end", type=int, default=None)
 
-    # parser.add_argument('--seq_len', type=int, default=60, help='input series length')
-    # parser.add_argument('--label_len', type=int, default=30, help='help series length')
-    # parser.add_argument('--pred_len', type=int, default=24, help='predict series length')
+    parser.add_argument('--seq_len', type=int, default=60, help='input series length')
+    parser.add_argument('--label_len', type=int, default=30, help='help series length')
+    parser.add_argument('--pred_len', type=int, default=24, help='predict series length')
+    parser.add_argument('--keep_time', type=bool, default=False, help='keep time data as pos.emb. for the Informer')
 
     # --- Model params ---
-    parser.add_argument("--run_name", type=str, default="-1",
-                        help="name of run to use, or -1, -2, etc. to find last, previous from last, etc. run.")
+    parser.add_argument("--run_name", type=str, default="-1", help="name of run to use, or -1, -2, etc. to find last, previous from last, etc. run.")
 
     # --- Predict params ---
     parser.add_argument("--use_cuda", type=str2bool, default=True)
     parser.add_argument("--show_details", type=str2bool, default=True)
     parser.add_argument("--threshold", type=str, default="POT")
+
     # If threshold is set to POT, these are the POT params
     parser.add_argument("--use_mov_av", type=str2bool, default=False)
     parser.add_argument("--q", type=float, default=1e-3)
@@ -106,3 +108,23 @@ def predict_parser():
     parser.add_argument("--dynamic_pot", type=str2bool, default=False)
 
     return parser
+
+def get_args(train=True):
+
+    parser = train_parser() if train else predict_parser()
+    args = parser.parse_args()
+
+    data_parser = {
+    'WADI':{'data':'WADI_14days_downsampled.csv','T':'1_LS_001_AL','M':112,'S':1},
+    'SMAP':{'data':'SMAP','T':0,'M':25,'S':1},
+    'MSL':{'data':'MSL','T':0,'M':55,'S':1},
+    'swat':{'data':'SWaT','T':'FIT_101','M':51,'S':1}
+    }   
+
+    if args.dataset in data_parser.keys():
+        data_info = data_parser[args.dataset]
+        # args.data_path = data_info['data']
+        args.target = data_info['T']
+        args.num_nodes = data_info[args.features]
+    
+    return args

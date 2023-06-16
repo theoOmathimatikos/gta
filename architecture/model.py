@@ -33,6 +33,7 @@ class Handler:
         scheduler,
         window_size,
         n_features,
+        pred_len,
         batch_size=256,
         n_epochs=200,
         patience=None,
@@ -40,14 +41,17 @@ class Handler:
         # recon_criterion=nn.MSELoss(),
         use_cuda=True,
         print_every=1,
+        keep_time=False
         # gamma=1.0
     ):
 
         self.model = model
         self.optimizer = optimizer
         self.scheduler = scheduler
+        self.keep_time = keep_time
         self.window_size = window_size
         self.n_features = n_features
+        self.pred_len = pred_len
         self.batch_size = batch_size
         self.n_epochs = n_epochs
         self.patience = patience
@@ -68,60 +72,98 @@ class Handler:
         :param loader: loader of input data
         :param mode: "train" in order to do backpropagation for learning
         """
-        train = mode=="train"
+        train_mode = mode=="train"
 
-        if train: 
+        if train_mode: 
             self.model.train()  # Set to train mode
         else: 
             self.model.eval() # Set to eval mode
         
         forecast_losses = [] 
+        message_losses = []
         # recon_losses = []
 
-        with torch.set_grad_enabled(train): # Context-manager that sets gradient calculation on or off.
-            for x, y, x_mark, y_mark in loader: # TODO. 1. The loader should not load the labels. 
+        with torch.set_grad_enabled(train_mode): # Context-manager that sets gradient calculation on or off.
+
+            if self.keep_time:
                 
-                if train: 
-                    self.optimizer.zero_grad()
+                for x, y, x_mark, y_mark in loader:  
+                    forecast_loss, message_loss, _, _ = self.pass_loss(train_mode, x, y, x_mark, y_mark)
+                    forecast_losses.append(forecast_loss) 
+                    if train_mode: message_losses.append(message_loss)
+            
+            else:
 
-                x, x_mark = x.double().to(self.device), x_mark.double().to(self.device)
-                y, y_mark = y.double().to(self.device), y_mark.double().to(self.device)
+                for x, y in loader:                    
+                    forecast_loss, message_loss, _, _ = self.pass_loss(train_mode, x, y)
+                    forecast_losses.append(forecast_loss)
+                    if train_mode: message_losses.append(message_loss)
+                    break
 
-                output = self.model(x, y, x_mark, y_mark)
-                y = y[:, 1:, :].to(self.device)  # TODO. 2. Check why it is needed. 
-
-                pred = output.detach().cpu()
-                true = y.detach().cpu()
-
-                # In case objects are in shape (batch_size, 1, n_features)
-                if pred.ndim == 3: pred.squeeze_(1) 
-                if true.ndim == 3: true.squeeze_(1)
-
-                # Calculates RMSE given the MSE Loss functions. Add a penalty function to message passing
-                # in order to keep only the strongest links. 
-                forecast_loss = torch.sqrt(self.forecast_criterion(true, pred))
-                message_loss = torch.sum(torch.abs(self.model.gt_embedding.gc_module.logits[:, 0]))
-                loss = forecast_loss + message_loss
-
-                if train:
-                    loss.backward()
-                    self.optimizer.step()
-
-                forecast_losses.append(forecast_loss); message_losses.append(message_loss)
-
-                # TODO. 
+                # TODO. For later. 
                 # Shifting input to include the observed value (y) when doing the reconstruction
                 # i.e. remove the first timestamp from the window and append the observed value
                 # recon_x = torch.cat((x[:, 1:, :], y), dim=1)
                 # _, window_recon = self.model(recon_x)
 
         forecast_losses = np.array(forecast_losses)
-        message_losses = np.array(message_losses)
+        # message_losses = np.array(message_losses)
 
         forecast_epoch_loss = np.sqrt((forecast_losses ** 2).mean())
-        message_epoch_loss = np.sqrt((message_losses ** 2).mean()) # TODO. Check this loss. 
+        # message_epoch_loss = np.sqrt((message_losses ** 2).mean()) # TODO. Check this loss. 
 
-        return forecast_epoch_loss, message_epoch_loss
+        return forecast_epoch_loss  # , message_epoch_loss
+        
+    def pass_loss(self, train, *args):
+        """Calculates all the necessary values for a batch of a training/evaluation epoch. 
+        If called inside a training loop, it will calculate the loss, update the model's 
+        parameters and return the loss, otherwise (eval-score), it will only calculate the 
+        predicted and true values and return them.
+        
+        Designed to handle the different number of parameters for a gta model."""
+
+        # Make sure that the number of args passed is right
+        assert len(args)==2 or len(args)==4
+
+        if train: 
+            self.optimizer.zero_grad()
+
+        keep_args = [arg.double().to(self.device) for arg in args]
+        x, y = keep_args[:2]
+
+        if len(args)==2: 
+            output = self.model(x, y, None, None)
+        else:
+            output = self.model(x, y, keep_args[2], keep_args[3])
+
+        y = y[:, -self.pred_len:, :].to(self.device) 
+
+        pred = output.detach().cpu()
+        true = y.detach().cpu()
+
+        # In case objects are in shape (batch_size, 1, n_features)
+        if pred.ndim == 3: pred.squeeze_(1) 
+        if true.ndim == 3: true.squeeze_(1)
+
+        # Calculates RMSE given the MSE Loss functions. Add a penalty function to message passing
+        # in order to keep only the strongest links. 
+        if train:
+
+            forecast_loss = torch.sqrt(self.forecast_criterion(true, pred))
+            message_loss = torch.sum(torch.abs(self.model.gt_embedding.gc_module.logits[:, 0]))
+            loss = forecast_loss + message_loss
+
+            loss.backward()
+            self.optimizer.step()
+
+            return forecast_loss, message_loss, pred, true
+    
+        else:
+
+            forecast_loss = torch.sqrt(self.forecast_criterion(true, pred))
+            # Unnecessary to calculate message_loss, since it is only used by the model
+            # to make the graph structure more sparce (thus, keep only the important links)
+            return forecast_loss, None, pred, true
 
 
     def fit(self, train_loader, val_loader=None):
@@ -141,8 +183,8 @@ class Handler:
             print(f"[Epoch {epoch + 1}]")
             epoch_start = time.time() # start timing epoch
             
-            train_fc_loss, train_rc_loss = self.pass_epoch(train_loader, "train")
-            total_train_loss = train_fc_loss+train_rc_loss
+            train_fc_loss = self.pass_epoch(train_loader, "train")
+            # total_train_loss = train_fc_loss+train_rc_loss
             # Vary learning rate
             self.scheduler.step()
 
@@ -152,8 +194,8 @@ class Handler:
 
             # Evaluate on validation set if a val_loader is provided
             if val_loader is not None:
-                val_fc_loss, val_rc_loss = self.pass_epoch(val_loader, None)
-                total_val_loss = val_fc_loss+val_rc_loss
+                val_fc_loss = self.pass_epoch(val_loader, None) # , val_rc_loss
+                total_val_loss = val_fc_loss  # +val_rc_loss
 
                 # mlflow.log_metric(key="val_fc_loss", value=val_fc_loss, step=epoch+1)
                 # mlflow.log_metric(key="val_rc_loss", value=val_rc_loss, step=epoch+1)
@@ -184,15 +226,15 @@ class Handler:
                 s = (
                     f"Elapsed time: {epoch_time:.1f}s\n"
                     f"Forecasting Loss: {train_fc_loss:.5f},\t"
-                    f"Reconstruction Loss: {train_rc_loss:.5f},\t"
-                    f"Total Training Loss: {total_train_loss:.5f}."
+                    # f"Reconstruction Loss: {train_rc_loss:.5f},\t"
+                    # f"Total Training Loss: {total_train_loss:.5f}."
                 )
 
                 if val_loader is not None:
                     s += (
                         "\n"
                         f"Forecasting Loss: {val_fc_loss:.5f},\t"
-                        f"Reconstruction Loss: {val_rc_loss:.5f},\t"
+                        # f"Reconstruction Loss: {val_rc_loss:.5f},\t"
                         f"Total Validation Loss: {total_val_loss:.5f}."
                     )
 
@@ -215,29 +257,29 @@ class Handler:
         preds, actual = [], []  # recons = []
         with torch.no_grad():
 
-            for x, y, x_mark, y_mark in tqdm(loader):
+            if self.keep_time:
 
-                x, x_mark = x.to(self.device), x_mark.double().to(self.device)
-                y, y_mark = y.to(self.device), y_mark.double().to(self.device)
+                for x, y, x_mark, y_mark in tqdm(loader):    
+                    _, _, pred, true = self.pass_loss(False, x, y, x_mark, y_mark)
+                    preds.append(pred.numpy())
+                    actual.append(true.numpy().squeeze())
 
-                output = self.model(x)
-                y = y[:, 1:, :].to(self.device)
+            else:
+                
+                for x, y in tqdm(loader):    
+                    _, _, pred, true = self.pass_loss(False, x, y)
+                    preds.append(pred.numpy())
+                    actual.append(true.numpy().squeeze())
+                    break
 
-                pred = output.detach().cpu()
-                true = y.detach().cpu()
-
+                # TODO. For later
                 # Shifting input to include the observed value (y) when doing the reconstruction
                 # recon_x = torch.cat((x[:, 1:, :], y), dim=1)
                 # _, window_recon = self.model(recon_x)
 
-                # In case objects are in shape (batch_size, 1, n_features)
-                if pred.ndim == 3:
-                    pred = pred.squeeze(1)
-                if true.ndim == 3:
-                    true = true.squeeze(1)
-
-                preds.append(pred.numpy())
-                actual.append(true.numpy().squeeze())  # TODO. 3. squeeze sto numpy ti einai?
+                # Just to remember the right place of commands
+                # preds.append(pred.numpy())
+                # actual.append(true.numpy().squeeze())  # numpy also provides a "squeeze" method
 
                 # Extract last reconstruction only
                 # recons.append(window_recon[:, -1, :].detach().cpu().numpy())
@@ -263,16 +305,14 @@ class Handler:
             return anomaly_scores, df
 
         return anomaly_scores
-    
+
     def predict(self, scores, threshold):
         """Method that predicts anomalies given scores and a threshold
         :param scores: np array of anomaly scores
         :param threshold: threshold that separates anomalous from non anomalous values
         :return list of 0s and 1s corresponding to indices of scores
         """
-        # anomalies = [0 if score < threshold else 1 for score in scores]
-        anomalies = (scores<threshold).tolist() # TODO. 4. Does that work?
-
+        anomalies = [0 if score < threshold else 1 for score in scores]
         return anomalies
 
     def save(self, file_name):
